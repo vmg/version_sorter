@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <assert.h>
 #include "version_sorter.h"
 
 
@@ -217,3 +218,256 @@ version_sorter_sort(char **list, size_t list_len)
 
     return ordering;
 }
+
+enum {
+	VERSION_COMP_END = 0,
+	VERSION_COMP_NUMBER = 1,
+	VERSION_COMP_STRING = 2
+};
+
+struct version_number {
+	const char *original;
+	int original_idx;
+	struct version_comp{
+		uint32_t flags;
+		union {
+			uint32_t number;
+			struct strchunk {
+				uint16_t offset;
+				uint16_t len;
+			} string;
+		} as;
+	} components[1];
+};
+
+static int
+strchunk_cmp(const char *original_a, const struct strchunk *a,
+		const char *original_b, const struct strchunk *b)
+{
+	size_t len = (a->len < b->len) ? a->len : b->len;
+	int cmp = memcmp(original_a + a->offset, original_b + b->offset, len);
+	return cmp ? cmp : (int)(a->len - b->len);
+}
+
+
+static int
+compare_version_number(const struct version_number *a,
+		const struct version_number *b)
+{
+	int n = 0;
+
+	for (n = 0;; ++n) {
+		const struct version_comp *ca = &a->components[n];
+		const struct version_comp *cb = &b->components[n];
+
+		if (ca->flags == cb->flags) {
+			int cmp = 0;
+
+			switch(ca->flags) {
+			case VERSION_COMP_END:
+				/* Equal */
+				return 0;
+
+			case VERSION_COMP_NUMBER:
+				cmp = (int)ca->as.number - (int)cb->as.number;
+				break;
+
+			case VERSION_COMP_STRING:
+				cmp = strchunk_cmp(
+					a->original, &ca->as.string,
+					b->original, &cb->as.string);
+				break;
+			}
+
+			if (cmp)
+				return cmp;
+		} else {
+			if (ca->flags == VERSION_COMP_END || ca->flags == VERSION_COMP_NUMBER) {
+				if (cb->flags == VERSION_COMP_STRING)
+					return 1;
+				return -1;
+			}
+
+			if (cb->flags == VERSION_COMP_END || ca->flags == VERSION_COMP_STRING) {
+				if (ca->flags == VERSION_COMP_STRING)
+					return -1;
+				return +1;
+			}
+
+			assert(0); /* unreachable? */
+		}
+	}
+}
+
+static int
+compare_callback(const void *a, const void *b)
+{
+    return compare_version_number(
+		(*(const struct version_number **)a),
+		(*(const struct version_number **)b));
+}
+
+static struct version_number *
+resize_version(struct version_number *version, uint16_t new_size)
+{
+	return xrealloc(version,
+		(sizeof(struct version_number) +
+		 sizeof(struct version_comp) * new_size));
+}
+
+static struct version_number *
+parse_version_number(const char *string)
+{
+	struct version_number *version = NULL;
+	uint16_t offset;
+	uint16_t comp_n = 0, comp_alloc = 0;
+
+	for (offset = 0; string[offset];) {
+		if (comp_n >= comp_alloc) {
+			comp_alloc += 4;
+			version = resize_version(version, comp_alloc);
+		}
+
+		if (isdigit(string[offset])) {
+			uint32_t number = 0;
+			uint32_t old_number;
+
+			while (isdigit(string[offset])) {
+				old_number = number;
+				number = (10 * number) + (string[offset] - '0');
+
+				if (number < old_number)
+					rb_raise(rb_eRuntimeError,
+						"overflow when comparing numbers in version string");
+
+				offset++;
+			}
+
+			version->components[comp_n].as.number = number;
+			version->components[comp_n].flags = VERSION_COMP_NUMBER;
+			comp_n++;
+			continue;
+		}
+
+		if (string[offset] == '-' || isalpha(string[offset])) {
+			uint16_t start = offset;
+			uint16_t len = 0;
+
+			if (string[offset] == '-') {
+				offset++;
+				len++;
+			}
+
+			while (isalpha(string[offset])) {
+				offset++;
+				len++;
+			}
+
+			version->components[comp_n].as.string.offset = start;
+			version->components[comp_n].as.string.len = len;
+			version->components[comp_n].flags = VERSION_COMP_STRING;
+			comp_n++;
+			continue;
+		}
+
+		offset++;
+	}
+
+	version->components[comp_n].flags = VERSION_COMP_END;
+	version->original = string;
+	return version;
+}
+
+VALUE version_sort_rb(VALUE rb_self, VALUE rb_version_array)
+{
+	struct version_number **versions;
+	long length, i;
+	VALUE rb_result_array;
+
+	Check_Type(rb_version_array, T_ARRAY);
+
+	length = RARRAY_LEN(rb_version_array);
+	versions = xcalloc(length, sizeof(struct version_number *));
+
+	for (i = 0; i < length; ++i) {
+		VALUE rb_version = RARRAY_AREF(rb_version_array, i);
+		versions[i] = parse_version_number(StringValuePtr(rb_version));
+		versions[i]->original_idx = i;
+	}
+
+    qsort(versions, length, sizeof(struct version_number *), &compare_callback);
+	rb_result_array = rb_ary_new2(length);
+	rb_ary_resize(rb_result_array, length);
+
+	for (i = 0; i < length; ++i) {
+		VALUE rb_version = RARRAY_AREF(rb_version_array, versions[i]->original_idx);
+		RARRAY_ASET(rb_result_array, i, rb_version);
+		xfree(versions[i]);
+	}
+	xfree(versions);
+	return rb_result_array;
+}
+
+#if 0
+static long qsort_partition(
+	struct version_number **dst,
+	const long left, const long right, const long pivot)
+{
+	struct version_number *value = dst[pivot];
+	long index = left;
+	long i;
+	int all_same = 1;
+
+	SORT_SWAP(dst[pivot], dst[right]);
+
+	for (i = left; i < right; i++) {
+		int cmp = SORT_CMP(dst[i], value);
+
+		if (cmp != 0)
+			all_same &= 0;
+
+		if (cmp < 0) {
+			SORT_SWAP(dst[i], dst[index]);
+			index++;
+		}
+	}
+
+	SORT_SWAP(dst[right], dst[index]);
+
+	if (all_same)
+		return -1;
+
+	return index;
+}
+
+static void qsort_r(struct version_number **dst,
+		const long left, const long right)
+{
+	long pivot;
+	long new_pivot;
+
+	if (right <= left)
+		return;
+
+	if ((right - left + 1) < 16) {
+		binary_insertion_sort(&dst[left], right - left + 1);
+		return;
+	}
+
+	pivot = left + ((right - left) >> 1);
+	new_pivot = qsort_partition(dst, left, right, pivot);
+
+	if (new_pivot < 0)
+		return;
+
+	qsort_r(dst, left, new_pivot - 1);
+	qsort_r(dst, new_pivot + 1, right);
+}
+
+void quicksort(struct version_number **dst, const long size)
+{
+	if (size)
+		qsort_r(dst, 0, size - 1);
+}
+
+#endif

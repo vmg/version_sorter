@@ -48,10 +48,13 @@ rb_rsort(VALUE obj, VALUE list)
     return dest;
 }
 
+extern VALUE version_sort_rb(VALUE rb_version_array);
+
 void
 Init_version_sorter(void)
 {
     rb_version_sorter_module = rb_define_module("VersionSorter");
     rb_define_module_function(rb_version_sorter_module, "sort", rb_sort, 1);
     rb_define_module_function(rb_version_sorter_module, "rsort", rb_rsort, 1);
+    rb_define_module_function(rb_version_sorter_module, "sort_", version_sort_rb, 1);
 }
