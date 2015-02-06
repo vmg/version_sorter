@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include <assert.h>
 #include "version_sorter.h"
+#include "ksort.h"
 
 static VersionSortingItem * version_sorting_item_init(const char *, int);
 static void version_sorting_item_free(VersionSortingItem *);
@@ -361,7 +362,9 @@ parse_version_number(const char *string)
 	return version;
 }
 
-void quicksort(struct version_number **dst, const long size);
+typedef struct version_number *version_ptr;
+#define VERSION_LT(a, b) (compare_version_number(a, b) < 0)
+KSORT_INIT(version, version_ptr, VERSION_LT)
 
 VALUE version_sort_rb(VALUE rb_self, VALUE rb_version_array)
 {
@@ -380,7 +383,7 @@ VALUE version_sort_rb(VALUE rb_self, VALUE rb_version_array)
 		versions[i]->original_idx = i;
 	}
 
-    qsort(versions, length, sizeof(struct version_number *), &compare_callback);
+	ks_mergesort(version, length, versions);
 	rb_result_array = rb_ary_new2(length);
 	rb_ary_resize(rb_result_array, length);
 
@@ -392,5 +395,3 @@ VALUE version_sort_rb(VALUE rb_self, VALUE rb_version_array)
 	xfree(versions);
 	return rb_result_array;
 }
-
-#define SORT_SWAP(a,b) { struct version_number *tmp = a; a = b; b = tmp; }
